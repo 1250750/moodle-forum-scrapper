@@ -1,24 +1,3 @@
-// ==UserScript==
-// @name         Moodle Forum Q&A Scraper
-// @match        *://*/mod/forum/view.php*
-// @match        *://*/mod/forum/discuss.php*
-// @grant        none
-// @run-at       document-idle
-// ==/UserScript==
-
-/*
-Instalação:
-1. Instale a extensão Tampermonkey no Brave/Chrome.
-2. Crie um novo script no Tampermonkey.
-3. Cole este ficheiro completo, guarde e abra um fórum Moodle já autenticado.
-
-Segurança:
-- Não pede nem guarda username/password.
-- Usa apenas a sessão autenticada do browser.
-- Não envia dados para servidores externos.
-- Os dados ficam locais no browser até copiar ou descarregar.
-*/
-
 (function () {
   "use strict";
 
@@ -56,17 +35,8 @@ Segurança:
 
   let lastRequestAt = 0;
   let requestQueue = Promise.resolve();
-  let lastResult = null;
-  let isRunning = false;
 
-  const state = {
-    foundDiscussions: 0,
-    currentDiscussion: "",
-    extractedPosts: 0,
-    errors: 0,
-    status: "Pronto",
-    logs: [],
-  };
+  function noop() {}
 
   function normalizeWhitespace(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -119,23 +89,6 @@ Segurança:
     return parseNumericId(getUrl(urlLike).searchParams.get("d"));
   }
 
-  function getForumPageCmId(urlLike = location.href) {
-    return parseNumericId(getUrl(urlLike).searchParams.get("id"));
-  }
-
-  function getSesskey(doc = document) {
-    return (
-      window.M?.cfg?.sesskey ||
-      doc.querySelector('input[name="sesskey"]')?.value ||
-      doc.body?.dataset?.sesskey ||
-      null
-    );
-  }
-
-  function getWwwRoot() {
-    return window.M?.cfg?.wwwroot || location.origin;
-  }
-
   function getPageType(urlLike = location.href) {
     const url = getUrl(urlLike);
     if (/\/mod\/forum\/view\.php$/i.test(url.pathname)) {
@@ -145,6 +98,18 @@ Segurança:
       return "discussion";
     }
     return "unknown";
+  }
+
+  function getSesskey(doc = document) {
+    const fromMoodleConfig = window.M?.cfg?.sesskey;
+    const fromInput = doc.querySelector('input[name="sesskey"]')?.value;
+    const fromBody = doc.body?.dataset?.sesskey;
+    const fromHtml = (doc.documentElement?.innerHTML || "").match(/"sesskey"\s*:\s*"([^"]+)"/)?.[1];
+    return fromMoodleConfig || fromInput || fromBody || fromHtml || null;
+  }
+
+  function getWwwRoot() {
+    return window.M?.cfg?.wwwroot || location.origin;
   }
 
   function getForumTitle(doc = document) {
@@ -214,7 +179,7 @@ Segurança:
   }
 
   async function fetchHtmlDocument(url) {
-    return withRetry(`Falha ao carregar pagina`, async () => {
+    return withRetry("Falha ao carregar pagina", async () => {
       await waitForRequestSlot();
       const response = await fetch(url, {
         method: "GET",
@@ -235,7 +200,7 @@ Segurança:
   }
 
   async function postJson(url, payload) {
-    return withRetry(`Falha no AJAX JSON`, async () => {
+    return withRetry("Falha no AJAX JSON", async () => {
       await waitForRequestSlot();
       const response = await fetch(url, {
         method: "POST",
@@ -319,9 +284,7 @@ Segurança:
       nodes: Array.from(doc.querySelectorAll(selector)),
     }));
     variants.sort((a, b) => b.nodes.length - a.nodes.length);
-
-    const best = variants.find((variant) => variant.nodes.length > 0);
-    return best || { selector: null, nodes: [] };
+    return variants.find((variant) => variant.nodes.length > 0) || { selector: null, nodes: [] };
   }
 
   function guessPostId(node, index) {
@@ -492,10 +455,9 @@ Segurança:
 
     const root =
       ordered.find((post) => post.parentId == null || post.parentId === 0 || post.depth === 0) || ordered[0];
-    const questionId = root.id;
     return {
       question: root,
-      answers: ordered.filter((post) => post.id !== questionId),
+      answers: ordered.filter((post) => post.id !== root.id),
     };
   }
 
@@ -654,7 +616,8 @@ Segurança:
     }));
   }
 
-  async function collectAllForumViewPages(startUrl) {
+  async function collectAllForumViewPages(startUrl, callbacks) {
+    const onProgress = callbacks?.onProgress || noop;
     const queue = [canonicalizeForumViewUrl(startUrl)];
     const visited = new Set();
     const pages = [];
@@ -666,8 +629,9 @@ Segurança:
       }
 
       visited.add(url);
-      setStatus(`A carregar pagina do forum ${pages.length + 1}`);
-      const page = url === canonicalizeForumViewUrl(location.href) ? { url: location.href, doc: document } : await fetchHtmlDocument(url);
+      onProgress({ status: `A carregar pagina do forum ${pages.length + 1}` });
+      const currentCanonical = canonicalizeForumViewUrl(location.href);
+      const page = url === currentCanonical ? { url: location.href, doc: document } : await fetchHtmlDocument(url);
       pages.push(page);
 
       for (const nextUrl of collectForumPaginationLinks(page.doc, page.url)) {
@@ -697,13 +661,19 @@ Segurança:
     return results;
   }
 
-  async function scrapeDiscussion({ entry, doc = null, forumTitle = "", expandVisible = false }) {
+  async function scrapeDiscussion(options) {
+    const entry = options.entry;
+    const doc = options.doc || null;
+    const forumTitle = options.forumTitle || "";
+    const expandVisible = Boolean(options.expandVisible);
+    const onLog = options.onLog || noop;
+
     try {
       const page = doc ? { url: location.href, doc } : await fetchHtmlDocument(entry.url);
       if (expandVisible) {
         const clicks = await expandVisibleThread(page.doc);
         if (clicks) {
-          addLog(`Respostas expandidas: ${clicks}`);
+          onLog(`Respostas expandidas: ${clicks}`);
         }
       }
 
@@ -713,8 +683,7 @@ Segurança:
         sesskey: getSesskey(document),
         discussionId,
       });
-      const domPosts = ajaxPosts.length ? [] : scrapeDomPosts(page.doc);
-      const posts = ajaxPosts.length ? ajaxPosts : domPosts;
+      const posts = ajaxPosts.length ? ajaxPosts : scrapeDomPosts(page.doc);
       const { question, answers } = buildQuestionAndAnswers(posts);
 
       return {
@@ -735,97 +704,92 @@ Segurança:
     }
   }
 
-  async function scrapeForum() {
+  async function scrapeForum(options = {}) {
+    const onProgress = options.onProgress || noop;
+    const onLog = options.onLog || noop;
+    const concurrency = Math.max(1, Math.min(8, Number(options.concurrency || SETTINGS.defaultConcurrency)));
+
     if (getPageType() !== "forum") {
-      addLog("Esta pagina nao e uma lista de forum. Use Scrape current discussion.");
-      setStatus("Pagina invalida para forum");
-      return null;
+      throw new Error("Esta pagina nao e uma lista de forum.");
     }
 
-    resetStats("A iniciar scraping do forum");
     const forumTitle = getForumTitle(document);
-    const pages = await collectAllForumViewPages(location.href);
+    const pages = await collectAllForumViewPages(location.href, { onProgress });
     const entries = mergeDiscussionEntries(pages.flatMap((page) => collectDiscussionLinks(page.doc, page.url)));
-    state.foundDiscussions = entries.length;
-    renderProgress();
-    addLog(`Discussoes encontradas: ${entries.length}`);
+    onProgress({ foundDiscussions: entries.length, status: "Discussoes encontradas" });
+    onLog(`Discussoes encontradas: ${entries.length}`);
 
-    const concurrency = getConfiguredConcurrency();
     const discussions = await runPool(
       entries,
       async (entry, index) => {
-        state.currentDiscussion = `${index + 1}/${entries.length}: ${entry.title || entry.discussionId}`;
-        setStatus("A extrair discussoes");
-        const scraped = await scrapeDiscussion({ entry, forumTitle });
-        if (scraped.ok) {
-          state.extractedPosts += scraped.postCount;
+        onProgress({
+          currentDiscussion: `${index + 1}/${entries.length}: ${entry.title || entry.discussionId}`,
+          status: "A extrair discussoes",
+        });
+
+        const scraped = await scrapeDiscussion({ entry, forumTitle, onLog });
+        if (!scraped.ok) {
+          onProgress({ incrementErrors: 1 });
+          onLog(`Erro: ${scraped.title}`);
         } else {
-          state.errors += 1;
-          addLog(`Erro: ${scraped.title}`);
+          onProgress({ incrementPosts: scraped.postCount });
         }
-        renderProgress();
         return scraped;
       },
       concurrency
     );
 
-    lastResult = buildSimpleForumResult(
+    const result = buildSimpleForumResult(
       forumTitle,
       discussions.filter((discussion) => discussion.ok)
     );
-    window.__MOODLE_FORUM_QA_SCRAPER__ = lastResult;
-    setStatus(`Concluido: ${lastResult.discussions.length}/${entries.length} discussoes`);
-    addLog("Scraping concluido");
-    return lastResult;
+    onProgress({
+      status: `Concluido: ${result.discussions.length}/${entries.length} discussoes`,
+      result,
+    });
+    return result;
   }
 
-  async function scrapeCurrentDiscussion() {
+  async function scrapeCurrentDiscussion(options = {}) {
+    const onProgress = options.onProgress || noop;
+    const onLog = options.onLog || noop;
+
     if (getPageType() !== "discussion") {
-      addLog("Esta pagina nao e uma discussao Moodle.");
-      setStatus("Pagina invalida para discussao");
-      return null;
+      throw new Error("Esta pagina nao e uma discussao Moodle.");
     }
 
-    resetStats("A iniciar scraping da discussao");
-    state.foundDiscussions = 1;
-    state.currentDiscussion = getDiscussionTitle(document);
-    renderProgress();
+    const title = getDiscussionTitle(document);
+    onProgress({ foundDiscussions: 1, currentDiscussion: title, status: "A extrair discussao" });
 
     const scraped = await scrapeDiscussion({
       entry: {
         discussionId: getDiscussionId(location.href),
         url: location.href,
-        title: getDiscussionTitle(document),
+        title,
       },
       doc: document,
       forumTitle: getForumTitle(document),
       expandVisible: true,
+      onLog,
     });
 
-    if (scraped.ok) {
-      state.extractedPosts = scraped.postCount;
-      lastResult = buildSimpleForumResult(scraped.forumTitle, [scraped]);
-      window.__MOODLE_FORUM_QA_SCRAPER__ = lastResult;
-      setStatus("Discussao concluida");
-      addLog("Scraping concluido");
-    } else {
-      state.errors = 1;
-      setStatus("Erro ao extrair discussao");
-      addLog(scraped.error);
+    if (!scraped.ok) {
+      onProgress({ incrementErrors: 1, status: "Erro ao extrair discussao" });
+      throw new Error(scraped.error);
     }
 
-    renderProgress();
-    return lastResult;
+    onProgress({ incrementPosts: scraped.postCount, status: "Discussao concluida" });
+    return buildSimpleForumResult(scraped.forumTitle, [scraped]);
   }
 
   function toMarkdown(data) {
     const lines = [`# ${data.forum}`, ""];
     for (const discussion of data.discussions || []) {
       lines.push(`## ${discussion.title}`, "");
-      lines.push(`**Pergunta — ${discussion.question.author || "Autor desconhecido"}**`);
+      lines.push(`**Pergunta - ${discussion.question.author || "Autor desconhecido"}**`);
       lines.push(discussion.question.text || "", "");
       for (const answer of discussion.answers || []) {
-        lines.push(`**Resposta — ${answer.author || "Autor desconhecido"}**`);
+        lines.push(`**Resposta - ${answer.author || "Autor desconhecido"}**`);
         lines.push(answer.text || "", "");
       }
     }
@@ -843,451 +807,13 @@ Segurança:
     return name || "moodle-forum";
   }
 
-  function downloadText(content, filename, type) {
-    const blob = new Blob([content], { type });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    setTimeout(() => {
-      URL.revokeObjectURL(link.href);
-      link.remove();
-    }, 1000);
-  }
-
-  function downloadJson() {
-    if (!lastResult) {
-      addLog("Sem dados para descarregar.");
-      return;
-    }
-    downloadText(
-      JSON.stringify(lastResult, null, 2),
-      `${safeBaseName(lastResult.forum)}.json`,
-      "application/json;charset=utf-8"
-    );
-    addLog("JSON descarregado");
-  }
-
-  function downloadMarkdown() {
-    if (!lastResult) {
-      addLog("Sem dados para descarregar.");
-      return;
-    }
-    downloadText(toMarkdown(lastResult), `${safeBaseName(lastResult.forum)}.md`, "text/markdown;charset=utf-8");
-    addLog("Markdown descarregado");
-  }
-
-  async function copyJson() {
-    if (!lastResult) {
-      addLog("Sem dados para copiar.");
-      return;
-    }
-
-    const text = JSON.stringify(lastResult, null, 2);
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const area = document.createElement("textarea");
-        area.value = text;
-        area.style.position = "fixed";
-        area.style.opacity = "0";
-        document.body.appendChild(area);
-        area.select();
-        document.execCommand("copy");
-        area.remove();
-      }
-      addLog("JSON copiado para clipboard");
-    } catch (error) {
-      addLog(`Erro ao copiar: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  async function runExclusive(task) {
-    if (isRunning) {
-      addLog("Ja existe um scraping em curso.");
-      return;
-    }
-
-    isRunning = true;
-    setButtonsDisabled(true);
-    try {
-      await task();
-    } finally {
-      isRunning = false;
-      setButtonsDisabled(false);
-    }
-  }
-
-  function resetStats(status) {
-    state.foundDiscussions = 0;
-    state.currentDiscussion = "";
-    state.extractedPosts = 0;
-    state.errors = 0;
-    state.status = status;
-    state.logs = [];
-    renderProgress();
-    addLog(status);
-  }
-
-  function setStatus(status) {
-    state.status = status;
-    renderProgress();
-  }
-
-  function addLog(message) {
-    state.logs.unshift(`${new Date().toLocaleTimeString()} - ${normalizeWhitespace(message)}`);
-    state.logs = state.logs.slice(0, 6);
-    renderLogs();
-  }
-
-  function getConfiguredConcurrency() {
-    const input = document.querySelector("#mfsConcurrency");
-    const value = Number(input?.value || SETTINGS.defaultConcurrency);
-    return Math.max(1, Math.min(8, Number.isFinite(value) ? Math.round(value) : SETTINGS.defaultConcurrency));
-  }
-
-  function createButton(label, handler) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "mfs-button";
-    button.textContent = label;
-    button.addEventListener("click", handler);
-    return button;
-  }
-
-  function createUi() {
-    if (document.querySelector("#moodleForumScraper")) {
-      return;
-    }
-
-    const style = document.createElement("style");
-    style.textContent = `
-      #moodleForumScraper {
-        position: fixed;
-        right: 18px;
-        bottom: 18px;
-        z-index: 99999;
-        width: 320px;
-        max-width: calc(100vw - 36px);
-        border: 1px solid rgba(26, 35, 51, 0.18);
-        border-radius: 16px;
-        background: linear-gradient(145deg, #f8fbff, #eef4f7);
-        color: #172033;
-        box-shadow: 0 18px 50px rgba(12, 20, 31, 0.22);
-        font: 13px/1.35 "Segoe UI", Tahoma, sans-serif;
-        overflow: hidden;
-      }
-      #moodleForumScraper.mfs-minimized .mfs-body {
-        display: none;
-      }
-      #moodleForumScraper .mfs-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 12px 14px;
-        background: #172033;
-        color: #fff;
-      }
-      #moodleForumScraper .mfs-title {
-        font-weight: 700;
-        letter-spacing: 0.01em;
-      }
-      #moodleForumScraper .mfs-minimize {
-        border: 0;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.14);
-        color: #fff;
-        cursor: pointer;
-        width: 28px;
-        height: 28px;
-      }
-      #moodleForumScraper .mfs-body {
-        padding: 12px;
-      }
-      #moodleForumScraper .mfs-actions {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-      #moodleForumScraper .mfs-button {
-        border: 0;
-        border-radius: 10px;
-        background: #245b4f;
-        color: #fff;
-        cursor: pointer;
-        padding: 9px 10px;
-        font-weight: 650;
-      }
-      #moodleForumScraper .mfs-button:nth-child(3),
-      #moodleForumScraper .mfs-button:nth-child(4),
-      #moodleForumScraper .mfs-button:nth-child(5),
-      #moodleForumScraper .mfs-button:nth-child(6) {
-        background: #31475f;
-      }
-      #moodleForumScraper .mfs-button:disabled {
-        cursor: not-allowed;
-        opacity: 0.55;
-      }
-      #moodleForumScraper .mfs-progress {
-        margin-top: 10px;
-        border-radius: 12px;
-        background: rgba(23, 32, 51, 0.07);
-        padding: 10px;
-      }
-      #moodleForumScraper .mfs-progress div {
-        margin: 2px 0;
-      }
-      #moodleForumScraper .mfs-current {
-        word-break: break-word;
-      }
-      #moodleForumScraper .mfs-options {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-top: 10px;
-      }
-      #moodleForumScraper .mfs-options input {
-        width: 54px;
-        border: 1px solid rgba(23, 32, 51, 0.2);
-        border-radius: 8px;
-        padding: 5px 7px;
-      }
-      #moodleForumScraper .mfs-logs {
-        margin-top: 10px;
-        min-height: 72px;
-        max-height: 96px;
-        overflow: auto;
-        border-radius: 10px;
-        background: #101827;
-        color: #d9e7e2;
-        padding: 8px;
-        font: 11px/1.35 Consolas, monospace;
-        white-space: pre-wrap;
-      }
-      #mfsPreviewOverlay {
-        position: fixed;
-        inset: 0;
-        z-index: 100000;
-        background: rgba(5, 10, 18, 0.55);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
-      }
-      #mfsPreviewModal {
-        width: min(860px, 96vw);
-        max-height: 88vh;
-        overflow: auto;
-        border-radius: 18px;
-        background: #fbfaf6;
-        color: #172033;
-        box-shadow: 0 25px 80px rgba(0, 0, 0, 0.35);
-      }
-      #mfsPreviewModal .mfs-preview-header {
-        position: sticky;
-        top: 0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        padding: 16px 18px;
-        background: #fbfaf6;
-        border-bottom: 1px solid rgba(23, 32, 51, 0.12);
-      }
-      #mfsPreviewModal .mfs-preview-content {
-        padding: 18px;
-      }
-      #mfsPreviewModal .mfs-preview-discussion {
-        padding: 16px 0;
-        border-bottom: 1px solid rgba(23, 32, 51, 0.12);
-      }
-      #mfsPreviewModal h2 {
-        margin: 0 0 10px;
-        font-size: 20px;
-      }
-      #mfsPreviewModal h3 {
-        margin: 12px 0 6px;
-        font-size: 14px;
-        color: #245b4f;
-      }
-      #mfsPreviewModal p {
-        margin: 0 0 10px;
-        white-space: pre-wrap;
-      }
-      #mfsPreviewModal button {
-        border: 0;
-        border-radius: 10px;
-        background: #172033;
-        color: #fff;
-        cursor: pointer;
-        padding: 8px 12px;
-      }
-    `;
-    document.head.appendChild(style);
-
-    const panel = document.createElement("section");
-    panel.id = "moodleForumScraper";
-
-    const header = document.createElement("div");
-    header.className = "mfs-header";
-    const title = document.createElement("div");
-    title.className = "mfs-title";
-    title.textContent = "Moodle Scraper";
-    const minimize = document.createElement("button");
-    minimize.type = "button";
-    minimize.className = "mfs-minimize";
-    minimize.textContent = "-";
-    minimize.title = "Minimizar";
-    minimize.addEventListener("click", () => {
-      panel.classList.toggle("mfs-minimized");
-      minimize.textContent = panel.classList.contains("mfs-minimized") ? "+" : "-";
-    });
-    header.append(title, minimize);
-
-    const body = document.createElement("div");
-    body.className = "mfs-body";
-
-    const actions = document.createElement("div");
-    actions.className = "mfs-actions";
-    actions.append(
-      createButton("Scrape forum", () => runExclusive(scrapeForum)),
-      createButton("Scrape current discussion", () => runExclusive(scrapeCurrentDiscussion)),
-      createButton("Preview", showPreview),
-      createButton("Download JSON", downloadJson),
-      createButton("Download Markdown", downloadMarkdown),
-      createButton("Copy JSON", copyJson)
-    );
-
-    const options = document.createElement("label");
-    options.className = "mfs-options";
-    options.textContent = "Concorrencia";
-    const concurrency = document.createElement("input");
-    concurrency.id = "mfsConcurrency";
-    concurrency.type = "number";
-    concurrency.min = "1";
-    concurrency.max = "8";
-    concurrency.value = String(SETTINGS.defaultConcurrency);
-    options.appendChild(concurrency);
-
-    const progress = document.createElement("div");
-    progress.className = "mfs-progress";
-    progress.id = "mfsProgress";
-
-    const logs = document.createElement("div");
-    logs.className = "mfs-logs";
-    logs.id = "mfsLogs";
-
-    body.append(actions, options, progress, logs);
-    panel.append(header, body);
-    document.body.appendChild(panel);
-
-    renderProgress();
-    renderLogs();
-  }
-
-  function renderProgress() {
-    const progress = document.querySelector("#mfsProgress");
-    if (!progress) {
-      return;
-    }
-
-    progress.innerHTML = "";
-    const lines = [
-      ["Estado", state.status],
-      ["Discussoes encontradas", state.foundDiscussions],
-      ["Discussao atual", state.currentDiscussion || "-"],
-      ["Posts extraidos", state.extractedPosts],
-      ["Erros", state.errors],
-    ];
-
-    for (const [label, value] of lines) {
-      const line = document.createElement("div");
-      if (label === "Discussao atual") {
-        line.className = "mfs-current";
-      }
-      line.textContent = `${label}: ${value}`;
-      progress.appendChild(line);
-    }
-  }
-
-  function renderLogs() {
-    const logs = document.querySelector("#mfsLogs");
-    if (!logs) {
-      return;
-    }
-    logs.textContent = state.logs.length ? state.logs.join("\n") : "Sem logs.";
-  }
-
-  function setButtonsDisabled(disabled) {
-    document.querySelectorAll("#moodleForumScraper .mfs-button").forEach((button) => {
-      const label = button.textContent || "";
-      button.disabled = disabled && /^Scrape /.test(label);
-    });
-  }
-
-  function showPreview() {
-    if (!lastResult) {
-      addLog("Sem dados para preview.");
-      return;
-    }
-
-    document.querySelector("#mfsPreviewOverlay")?.remove();
-    const overlay = document.createElement("div");
-    overlay.id = "mfsPreviewOverlay";
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) {
-        overlay.remove();
-      }
-    });
-
-    const modal = document.createElement("div");
-    modal.id = "mfsPreviewModal";
-
-    const header = document.createElement("div");
-    header.className = "mfs-preview-header";
-    const heading = document.createElement("strong");
-    heading.textContent = `Preview: ${lastResult.forum}`;
-    const close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "Fechar";
-    close.addEventListener("click", () => overlay.remove());
-    header.append(heading, close);
-
-    const content = document.createElement("div");
-    content.className = "mfs-preview-content";
-
-    for (const discussion of lastResult.discussions || []) {
-      const block = document.createElement("article");
-      block.className = "mfs-preview-discussion";
-
-      const title = document.createElement("h2");
-      title.textContent = discussion.title;
-      block.appendChild(title);
-
-      const questionTitle = document.createElement("h3");
-      questionTitle.textContent = `Pergunta - ${discussion.question.author || "Autor desconhecido"}`;
-      const question = document.createElement("p");
-      question.textContent = discussion.question.text || "";
-      block.append(questionTitle, question);
-
-      for (const answer of discussion.answers || []) {
-        const answerTitle = document.createElement("h3");
-        answerTitle.textContent = `Resposta - ${answer.author || "Autor desconhecido"}`;
-        const answerText = document.createElement("p");
-        answerText.textContent = answer.text || "";
-        block.append(answerTitle, answerText);
-      }
-
-      content.appendChild(block);
-    }
-
-    modal.append(header, content);
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-  }
-
-  createUi();
+  window.MoodleForumScraperCore = {
+    SETTINGS,
+    getPageType,
+    scrapeForum,
+    scrapeCurrentDiscussion,
+    toMarkdown,
+    safeBaseName,
+    normalizeWhitespace,
+  };
 })();

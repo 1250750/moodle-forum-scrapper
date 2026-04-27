@@ -1,51 +1,48 @@
 # Moodle Forum Q&A Scraper
 
-Userscript Tampermonkey para extrair perguntas e respostas de foruns Moodle usando a sessao ja autenticada do browser.
+Extensao Chrome/Brave Manifest V3 para organizar conteudo de foruns Moodle onde ja estas autenticado.
 
-Nao pede username/password, nao envia dados para servidores externos e corre localmente dentro da pagina Moodle.
+A extensao adiciona uma UI flutuante nas paginas Moodle de forum e discussao, extrai perguntas e respostas, e exporta os dados para JSON ou Markdown.
 
-## Ficheiro principal
+## Ficheiros
 
-- `moodle-forum-qa-scraper.user.js`
+- `manifest.json`: configuracao da extensao MV3.
+- `scraper-core.js`: logica de scraping, paginacao, AJAX Moodle e fallback DOM.
+- `content.js`: UI flutuante, preview, downloads e clipboard.
+- `panel.css`: estilos da UI.
+- `README.md`: instrucoes de instalacao e uso.
 
-## Instalacao
+## Instalacao no Chrome ou Brave
 
-1. Instala a extensao Tampermonkey no Brave ou Chrome.
-2. Abre o dashboard do Tampermonkey.
-3. Cria um novo script.
-4. Cola o conteudo completo de `moodle-forum-qa-scraper.user.js`.
-5. Guarda o script.
-6. Abre uma pagina Moodle ja autenticada em:
-- `/mod/forum/view.php`
-- `/mod/forum/discuss.php`
+1. Abre `chrome://extensions`.
+2. Ativa `Developer mode`.
+3. Clica em `Load unpacked`.
+4. Seleciona esta pasta do projeto.
+5. Abre uma pagina Moodle onde ja tenhas sessao iniciada.
+
+A extensao corre apenas nestas paginas:
+
+- `*://*/mod/forum/view.php*`
+- `*://*/mod/forum/discuss.php*`
 
 ## Uso
 
-Ao abrir uma pagina compativel, aparece uma UI flutuante no canto inferior direito com o titulo `Moodle Scraper`.
+Quando abres uma pagina Moodle compativel, aparece um painel no canto inferior direito com o titulo `Moodle Scraper`.
 
-Botoes disponiveis:
+Botoes:
 
-- `Scrape forum`: extrai todas as discussoes encontradas na pagina de forum, incluindo paginacao.
+- `Scrape forum`: extrai discussoes encontradas na pagina de forum e segue paginacao.
 - `Scrape current discussion`: extrai apenas a discussao aberta.
-- `Preview`: mostra uma pre-visualizacao dentro da pagina.
-- `Download JSON`: descarrega o resultado em JSON.
-- `Download Markdown`: descarrega o resultado em Markdown.
+- `Preview`: abre um modal com o resultado estruturado.
+- `Download JSON`: descarrega o JSON final.
+- `Download Markdown`: descarrega o Markdown final.
 - `Copy JSON`: copia o JSON formatado para o clipboard.
 
-A UI mostra:
-
-- numero de discussoes encontradas;
-- discussao atual;
-- numero de posts extraidos;
-- numero de erros;
-- estado final;
-- logs curtos de execucao.
+O campo `Concorrencia` controla quantas discussoes sao processadas em paralelo. O valor por defeito e `3`.
 
 ## Output JSON
 
-O JSON exportado e simples e nao inclui metadata tecnica, URLs, IDs, HTML bruto, logs ou timestamps.
-
-Formato:
+O JSON final e simples e nao inclui ids, HTML, URLs, timestamps, raw data, evidence ou logs.
 
 ```json
 {
@@ -54,13 +51,13 @@ Formato:
     {
       "title": "Titulo da discussao",
       "question": {
-        "author": "Nome do autor",
-        "text": "Texto da pergunta"
+        "author": "Autor",
+        "text": "Pergunta"
       },
       "answers": [
         {
-          "author": "Nome do autor",
-          "text": "Texto da resposta"
+          "author": "Autor",
+          "text": "Resposta"
         }
       ]
     }
@@ -69,8 +66,6 @@ Formato:
 ```
 
 ## Output Markdown
-
-Formato:
 
 ```md
 # Nome do forum
@@ -84,32 +79,30 @@ Texto da pergunta
 Texto da resposta
 ```
 
-## Como funciona
+## O que a extensao faz
 
-O script tenta extrair posts por AJAX JSON do Moodle quando possivel. Se isso falhar, usa fallback por DOM da pagina.
-
-Tambem suporta:
-
-- detecao automatica entre pagina de forum e pagina de discussao;
-- recolha de links de discussoes;
-- paginacao do forum;
-- expansao de respostas visiveis;
-- normalizacao de whitespace;
-- retry automatico em pedidos;
-- pequeno delay entre pedidos;
-- concorrencia configuravel, por defeito `3`;
-- erro por discussao sem parar o scraping completo.
+- Deteta se a pagina atual e uma lista de forum ou uma discussao.
+- Recolhe links de discussoes.
+- Segue paginacao do forum.
+- Tenta usar AJAX JSON do Moodle quando existe `sesskey`.
+- Usa fallback por DOM quando AJAX falha.
+- Expande respostas visiveis na discussao atual quando encontra botoes de expandir.
+- Normaliza whitespace.
+- Usa retries em pedidos HTTP.
+- Apanha erros por discussao sem parar o scraping completo.
 
 ## Seguranca e privacidade
 
-- Nao pede credenciais.
-- Nao guarda passwords.
-- Usa apenas cookies/sessao ja existentes no browser.
-- Nao envia dados para APIs externas.
-- O resultado fica local no browser ate copiares ou descarregares.
+- Nao pede login.
+- Nao pede password.
+- Nao contorna autenticacao.
+- Usa apenas a sessao Moodle ja aberta no browser.
+- Le apenas conteudo acessivel na pagina atual ou em paginas do mesmo forum navegadas pela tua sessao.
+- Nao envia dados para servidores externos.
+- Os dados ficam locais ate copiares ou descarregares.
 
-## Limitacoes
+## Limites conhecidos
 
-Moodle pode variar muito entre versoes, temas e configuracoes. O script cobre seletores e endpoints comuns, mas alguns foruns personalizados podem precisar de ajustes.
+Moodle varia entre versoes, temas e configuracoes. A extensao cobre seletores e endpoints comuns, mas foruns muito personalizados podem precisar de ajustes.
 
-Se o Moodle bloquear AJAX ou se a estrutura HTML for muito diferente, o fallback por DOM pode extrair menos dados.
+Se o Moodle nao expuser `sesskey` ou bloquear endpoints AJAX, a extensao usa fallback por DOM. Nesse caso, pode extrair menos dados dependendo do HTML disponivel.

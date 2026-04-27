@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Moodle Forum Q&A Scraper",
+  "version": "1.0.0",
+  "description": "Organiza perguntas e respostas de foruns Moodle onde o utilizador ja esta autenticado.",
+  "permissions": ["clipboardWrite"],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*/mod/forum/view.php*",
+        "*://*/mod/forum/discuss.php*"
+      ],
+      "js": ["scraper-core.js", "content.js"],
+      "css": ["panel.css"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}

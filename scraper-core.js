@@ -5,7 +5,7 @@
     defaultConcurrency: 3,
     maxForumPages: 200,
     retryCount: 2,
-    requestDelayMs: 180,
+    requestDelayMs: 50,
   };
 
   const JSON_METHOD_CANDIDATES = [
@@ -33,8 +33,8 @@
 
   const POST_HINTS = ["id", "subject", "message", "author", "authorfullname", "parentid"];
 
-  let lastRequestAt = 0;
-  let requestQueue = Promise.resolve();
+  let preferredAjaxMethod = "";
+  let ajaxDisabled = false;
 
   function noop() {}
 
@@ -146,20 +146,9 @@
   }
 
   async function waitForRequestSlot() {
-    const previous = requestQueue;
-    let release = null;
-    requestQueue = new Promise((resolve) => {
-      release = resolve;
-    });
-
-    await previous;
-    const elapsed = Date.now() - lastRequestAt;
-    const waitMs = Math.max(0, SETTINGS.requestDelayMs - elapsed);
-    if (waitMs) {
-      await sleep(waitMs);
+    if (SETTINGS.requestDelayMs > 0) {
+      await sleep(SETTINGS.requestDelayMs);
     }
-    lastRequestAt = Date.now();
-    release();
   }
 
   async function withRetry(label, operation) {
@@ -419,11 +408,19 @@
   }
 
   async function probeAjaxPosts({ wwwroot, sesskey, discussionId }) {
-    if (!sesskey || !discussionId) {
+    if (!sesskey || !discussionId || ajaxDisabled) {
       return [];
     }
 
-    for (const candidate of JSON_METHOD_CANDIDATES) {
+    const candidates = preferredAjaxMethod
+      ? [
+          ...JSON_METHOD_CANDIDATES.filter((candidate) => candidate.method === preferredAjaxMethod),
+          ...JSON_METHOD_CANDIDATES.filter((candidate) => candidate.method !== preferredAjaxMethod),
+        ]
+      : JSON_METHOD_CANDIDATES;
+
+    let attempts = 0;
+    for (const candidate of candidates) {
       const args = candidate.buildArgs({ discussionId });
       const url =
         `${wwwroot.replace(/\/$/, "")}/lib/ajax/service.php` +
@@ -432,16 +429,22 @@
       const payload = [{ index: 0, methodname: candidate.method, args }];
 
       try {
+        attempts += 1;
         const json = await postJson(url, payload);
         const envelope = Array.isArray(json) ? json[0] : json;
         const data = envelope?.data ?? envelope;
         const best = collectPostArrays(data).sort((a, b) => b.score - a.score)[0];
         if (best?.items?.length) {
+          preferredAjaxMethod = candidate.method;
           return best.items.map((item, index) => normalizeAjaxPost(item, index));
         }
       } catch {
         // Se um metodo AJAX falhar, tentamos o proximo e depois o DOM.
       }
+    }
+
+    if (attempts >= candidates.length && !preferredAjaxMethod) {
+      ajaxDisabled = true;
     }
 
     return [];
@@ -663,33 +666,36 @@
 
   async function scrapeDiscussion(options) {
     const entry = options.entry;
-    const doc = options.doc || null;
+    let page = options.doc ? { url: location.href, doc: options.doc } : null;
     const forumTitle = options.forumTitle || "";
     const expandVisible = Boolean(options.expandVisible);
     const onLog = options.onLog || noop;
 
     try {
-      const page = doc ? { url: location.href, doc } : await fetchHtmlDocument(entry.url);
-      if (expandVisible) {
-        const clicks = await expandVisibleThread(page.doc);
-        if (clicks) {
-          onLog(`Respostas expandidas: ${clicks}`);
-        }
-      }
-
-      const discussionId = entry.discussionId || getDiscussionId(page.url);
+      const discussionId = entry.discussionId || getDiscussionId(entry.url || page?.url || location.href);
       const ajaxPosts = await probeAjaxPosts({
         wwwroot: getWwwRoot(),
         sesskey: getSesskey(document),
         discussionId,
       });
+
+      if (!ajaxPosts.length) {
+        page = page || (await fetchHtmlDocument(entry.url));
+        if (expandVisible) {
+          const clicks = await expandVisibleThread(page.doc);
+          if (clicks) {
+            onLog(`Respostas expandidas: ${clicks}`);
+          }
+        }
+      }
+
       const posts = ajaxPosts.length ? ajaxPosts : scrapeDomPosts(page.doc);
       const { question, answers } = buildQuestionAndAnswers(posts);
 
       return {
         ok: true,
-        forumTitle: forumTitle || getForumTitle(page.doc),
-        title: getDiscussionTitle(page.doc, entry.title),
+        forumTitle: forumTitle || (page ? getForumTitle(page.doc) : getForumTitle(document)),
+        title: page ? getDiscussionTitle(page.doc, entry.title) : getDiscussionTitle(document, entry.title),
         question,
         answers,
         postCount: posts.length,
